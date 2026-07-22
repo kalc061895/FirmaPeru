@@ -1,14 +1,15 @@
 <?php
 // params.php
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/token.php';
 
 function obtener_token()
-{
-    $data = array(
-        'client_id' => 'Wl16Z5dE1DIwMTQ1Njg2NTQ4p9dnf72Rng', // CREDENCIALES DE RED SALUD SAN ROMAN
-        'client_secret' => '7PXbFjOEEXJAo2cLOYaXH-1RYcwz6iebwBg', // CREDENCIALES DE RED SALUD SAN ROMAN
-    );
-
+{   
+    //$data = array(
+    //    'client_id' => 'xxxx', // CREDENCIALES 
+    //    'client_secret' => 'xxx', // CREDENCIALES 
+    //);
+    $data = getToken();
     $postData = http_build_query($data);
 
     $curl = curl_init();

@@ -1,3 +1,6 @@
 token.php
-archivos_sgd/
-sd_sgd_firmas.sqlite
+
+# .gitignore
+archivos_sgd/*
+!archivos_sgd/.gitkeep
+db_sgd_firmas.sqlite

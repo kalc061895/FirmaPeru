@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  app-sgd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sgd_firmas_app
+    ports:
+      - "8080:80"
+    volumes:
+      # Volúmenes para persistir la Base de Datos SQLite y los PDFs
+      - ./db_sgd_firmas.sqlite:/var/www/html/db_sgd_firmas.sqlite
+      - ./archivos_sgd:/var/www/html/archivos_sgd
+    restart: always

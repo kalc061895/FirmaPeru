@@ -71,7 +71,7 @@ if (isset($_GET['token']) && !empty($_FILES)) {
                         if ($stmtCheck->fetchColumn() > 0) {
                             // Crear un nombre UUID único para la nueva versión del documento
                             $uuidName = md5(uniqid(mt_rand(), true)) . '.pdf';
-                            $ruta_destino = '/archivos_sgd/' . $uuidName;
+                            $ruta_destino = 'archivos_sgd/' . $uuidName;
 
                             if (rename($pdfPath, __DIR__ . '/' . $ruta_destino)) {
                                 // Incrementar número de versión e insertar en BD
@@ -99,7 +99,7 @@ if (isset($_GET['token']) && !empty($_FILES)) {
         else {
             $codigo = is_array($codigos) ? $codigos[0] : $pendiente['codigo_documento'];
             $uuidName = md5(uniqid(mt_rand(), true)) . '.pdf';
-            $ruta_nuevo_firmado = '/archivos_sgd/' . $uuidName;
+            $ruta_nuevo_firmado = 'archivos_sgd/' . $uuidName;
 
             if (move_uploaded_file($_FILES[$fileKey]['tmp_name'], __DIR__ . '/' . $ruta_nuevo_firmado)) {
                 $stmtV = $pdo->prepare("SELECT COALESCE(MAX(version_nro), 0) FROM documento_versiones WHERE codigo_documento = ?");

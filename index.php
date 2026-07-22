@@ -33,7 +33,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 } while ($stmt->fetchColumn() > 0);
 
                 $uuidName = md5(uniqid(mt_rand(), true)) . '.pdf';
-                $ruta_destino = '/archivos_sgd/' . $uuidName;
+                $ruta_destino = 'archivos_sgd/' . $uuidName;
 
                 if (move_uploaded_file($_FILES['archivos_pdf']['tmp_name'][$i], __DIR__ . '/' . $ruta_destino)) {
                     $stmt = $pdo->prepare("INSERT INTO documentos (codigo, codigo_lote, nombre_original) VALUES (?, ?, ?)");
