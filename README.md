@@ -32,8 +32,11 @@ touch db_sgd_firmas.sqlite
 mkdir -p archivos_sgd
 
 # 3. Dar permisos de escritura para el contenedor
+# Otorgar permisos de lectura, escritura y ejecución a la carpeta de subidas
+chmod -R 777 archivos_sgd/
+
+# Asegurar también permisos en la base de datos SQLite
 chmod 777 db_sgd_firmas.sqlite
-chmod -R 777 archivos_sgd
 ```
 
 ---
