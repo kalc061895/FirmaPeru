@@ -9,7 +9,8 @@ function obtener_token()
     //    'client_id' => 'xxxx', // CREDENCIALES 
     //    'client_secret' => 'xxx', // CREDENCIALES 
     //);
-    $data = getToken();
+    $data = getToken(); //obtenemos tokens
+    
     $postData = http_build_query($data);
 
     $curl = curl_init();
@@ -63,7 +64,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $codigo_doc = is_array($codigos) ? $codigos[0] : $pendiente['codigo_documento'];
         $stmtVersion = $pdo->prepare("SELECT ruta_pdf FROM documento_versiones WHERE codigo_documento = ? ORDER BY version_nro DESC LIMIT 1");
         $stmtVersion->execute([$codigo_doc]);
-        $documento_url = $baseUrl . $stmtVersion->fetchColumn();
+        $documento_url = $baseUrl .'/'. $stmtVersion->fetchColumn();
     }
 
     $img = ($pendiente['signaturestyle'] == 1)

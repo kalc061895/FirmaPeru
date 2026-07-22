@@ -1,6 +1,24 @@
-token.php
+# === Seguridad y Entorno ===
+.env
+.env.local
+*.pem
+*.key
 
-# .gitignore
+# === Base de Datos Persistente ===
+db_sgd_firmas.sqlite
+db_sgd_firmas.sqlite-journal
+*.db
+*.sqlite
+
+# === Archivos de Usuario / Almacenamiento local ===
 archivos_sgd/*
 !archivos_sgd/.gitkeep
-db_sgd_firmas.sqlite
+
+# === Archivos del Sistema / Editores ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# === Logs ===
+*.log
