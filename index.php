@@ -2,67 +2,129 @@
 // index.php
 require_once __DIR__ . '/db.php';
 
-// Procesar Subidas de Documento Original por POST Ajax
+// Procesar Subidas, Consultas y Búsquedas por AJAX
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
+    if (ob_get_length()) ob_clean();
     header('Content-Type: application/json');
 
+    // 1. SUBIDA MULTIPLE DE DOCUMENTOS + CÓDIGO DE LOTE
     if ($_GET['action'] === 'subir') {
-        $nombre = $_POST['nombre_archivo'] ?? 'Documento sin título';
-
-        if (!isset($_FILES['archivo_pdf']) || $_FILES['archivo_pdf']['error'] !== UPLOAD_ERR_OK) {
-            echo json_encode(['status' => 'error', 'message' => 'Error al cargar el archivo PDF original.']);
+        if (!isset($_FILES['archivos_pdf']) || empty($_FILES['archivos_pdf']['name'][0])) {
+            echo json_encode(['status' => 'error', 'message' => 'Debe seleccionar al menos un archivo PDF.']);
             exit;
         }
 
-        // Generar clave única alfa-numérica de 4 dígitos
-        do {
-            $codigo = strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 4));
-            $stmt = $pdo->prepare("SELECT COUNT(*) FROM documentos WHERE codigo = ?");
-            $stmt->execute([$codigo]);
-        } while ($stmt->fetchColumn() > 0);
-
+        $totalArchivos = count($_FILES['archivos_pdf']['name']);
+        $registrados = [];
         $dir_archivos = __DIR__ . '/archivos_sgd/';
         if (!is_dir($dir_archivos)) mkdir($dir_archivos, 0777, true);
 
-        // El documento original también se enmascara con un UUID por seguridad
-        $uuidName = md5(uniqid(mt_rand(), true)) . '.pdf';
-        $ruta_destino = 'archivos_sgd/' . $uuidName;
+        // Generar un Código de Lote único
+        $codigoLote = 'L-' . strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 4));
 
-        if (move_uploaded_file($_FILES['archivo_pdf']['tmp_name'], __DIR__ . '/' . $ruta_destino)) {
-            $stmt = $pdo->prepare("INSERT INTO documentos (codigo, nombre_original) VALUES (?, ?)");
-            $stmt->execute([$codigo, $nombre]);
+        for ($i = 0; $i < $totalArchivos; $i++) {
+            if ($_FILES['archivos_pdf']['error'][$i] === UPLOAD_ERR_OK) {
+                $nombreOriginal = $_FILES['archivos_pdf']['name'][$i];
 
-            $stmt2 = $pdo->prepare("INSERT INTO documento_versiones (codigo_documento, ruta_pdf, version_nro, tipo_firma, cargo) VALUES (?, ?, 0, 'Original', 'Creador del Archivo')");
-            $stmt2->execute([$codigo, $ruta_destino]);
+                do {
+                    $codigoDoc = strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 4));
+                    $stmt = $pdo->prepare("SELECT COUNT(*) FROM documentos WHERE codigo = ?");
+                    $stmt->execute([$codigoDoc]);
+                } while ($stmt->fetchColumn() > 0);
 
-            echo json_encode(['status' => 'success', 'codigo' => $codigo]);
-        } else {
-            echo json_encode(['status' => 'error', 'message' => 'Error al mover el archivo al almacén.']);
+                $uuidName = md5(uniqid(mt_rand(), true)) . '.pdf';
+                $ruta_destino = '/archivos_sgd/' . $uuidName;
+
+                if (move_uploaded_file($_FILES['archivos_pdf']['tmp_name'][$i], __DIR__ . '/' . $ruta_destino)) {
+                    $stmt = $pdo->prepare("INSERT INTO documentos (codigo, codigo_lote, nombre_original) VALUES (?, ?, ?)");
+                    $stmt->execute([$codigoDoc, $codigoLote, $nombreOriginal]);
+
+                    $stmt2 = $pdo->prepare("INSERT INTO documento_versiones (codigo_documento, ruta_pdf, version_nro, tipo_firma, cargo) VALUES (?, ?, 0, 'Original', 'Creador del Archivo')");
+                    $stmt2->execute([$codigoDoc, $ruta_destino]);
+
+                    $registrados[] = [
+                        'codigo' => $codigoDoc,
+                        'nombre' => $nombreOriginal
+                    ];
+                }
+            }
+        }
+
+        echo json_encode([
+            'status'      => 'success',
+            'codigo_lote' => $codigoLote,
+            'docs'        => $registrados
+        ]);
+        exit;
+    }
+
+    // 2. LISTAR / BUSCAR DOCUMENTOS
+    if ($_GET['action'] === 'listar') {
+        try {
+            $busqueda = trim($_POST['busqueda'] ?? '');
+
+            $sql = "SELECT d.codigo, 
+                           COALESCE(d.codigo_lote, 'SIN_LOTE') AS codigo_lote,
+                           d.nombre_original, 
+                           d.fecha_creacion, 
+                           COALESCE(MAX(v.version_nro), 0) AS version_actual,
+                           (SELECT v2.ruta_pdf FROM documento_versiones v2 WHERE v2.codigo_documento = d.codigo ORDER BY v2.version_nro DESC LIMIT 1) as ruta_pdf
+                    FROM documentos d
+                    LEFT JOIN documento_versiones v ON d.codigo = v.codigo_documento";
+
+            $params = [];
+            if (!empty($busqueda)) {
+                $sql .= " WHERE d.codigo LIKE ? OR d.codigo_lote LIKE ? OR d.nombre_original LIKE ?";
+                $params[] = "%{$busqueda}%";
+                $params[] = "%{$busqueda}%";
+                $params[] = "%{$busqueda}%";
+            }
+
+            $sql .= " GROUP BY d.codigo, d.codigo_lote, d.nombre_original, d.fecha_creacion ORDER BY d.id DESC LIMIT 200";
+
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+            $docs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            echo json_encode(['status' => 'success', 'data' => $docs]);
+        } catch (PDOException $e) {
+            echo json_encode(['status' => 'error', 'message' => 'Error SQL: ' . $e->getMessage()]);
         }
         exit;
     }
 
+    // 3. OBTENER DETALLE POR CÓDIGOS DE DOCUMENTO O CÓDIGO DE LOTE
     if ($_GET['action'] === 'buscar') {
-        $codigo = strtoupper($_POST['codigo'] ?? '');
+        try {
+            $input = trim($_POST['query'] ?? '');
+            $codigos = $_POST['codigos'] ?? [];
 
-        $stmt = $pdo->prepare("SELECT * FROM documentos WHERE codigo = ?");
-        $stmt->execute([$codigo]);
-        $doc = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (is_string($codigos)) $codigos = explode(',', $codigos);
+            $codigos = array_filter(array_map('trim', $codigos));
 
-        if ($doc) {
-            // CRITICAL: Seleccionamos de forma estricta la ULTIMA versión registrada
-            $stmtV = $pdo->prepare("SELECT * FROM documento_versiones WHERE codigo_documento = ? ORDER BY version_nro DESC LIMIT 1");
-            $stmtV->execute([$codigo]);
-            $ultimaVersion = $stmtV->fetch(PDO::FETCH_ASSOC);
+            if (!empty($input) && strpos(strtoupper($input), 'L-') === 0) {
+                $stmtLote = $pdo->prepare("SELECT codigo FROM documentos WHERE codigo_lote = ?");
+                $stmtLote->execute([strtoupper($input)]);
+                $codigos = $stmtLote->fetchAll(PDO::FETCH_COLUMN);
+            }
 
-            echo json_encode([
-                'status' => 'success',
-                'nombre' => $doc['nombre_original'],
-                'codigo' => $doc['codigo'],
-                'data'   => $ultimaVersion
-            ]);
-        } else {
-            echo json_encode(['status' => 'error', 'message' => 'El código ingresado no existe en el sistema.']);
+            if (empty($codigos)) {
+                echo json_encode(['status' => 'error', 'message' => 'No se encontraron documentos vinculados.']);
+                exit;
+            }
+
+            $placeholders = implode(',', array_fill(0, count($codigos), '?'));
+            $stmt = $pdo->prepare("SELECT d.codigo, d.codigo_lote, d.nombre_original, v.version_nro, v.ruta_pdf 
+                                   FROM documentos d 
+                                   JOIN documento_versiones v ON d.codigo = v.codigo_documento 
+                                   WHERE d.codigo IN ($placeholders) 
+                                   AND v.version_nro = (SELECT MAX(version_nro) FROM documento_versiones WHERE codigo_documento = d.codigo)");
+            $stmt->execute($codigos);
+            $resultados = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            echo json_encode(['status' => 'success', 'data' => $resultados]);
+        } catch (PDOException $e) {
+            echo json_encode(['status' => 'error', 'message' => 'Error SQL: ' . $e->getMessage()]);
         }
         exit;
     }
@@ -80,124 +142,196 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     <style>
         body {
             background-color: #f4f6f9;
-            height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            min-height: 100vh;
             font-family: system-ui, -apple-system, sans-serif;
         }
 
-        .btn-add-floating {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            width: 55px;
-            height: 55px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 24px;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
-            z-index: 1050;
-        }
-
-        .search-card {
-            width: 100%;
-            max-width: 440px;
+        .main-card {
             border: none;
             border-radius: 15px;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
         }
 
-        .input-code {
-            text-transform: uppercase;
-            text-align: center;
-            font-size: 26px;
-            letter-spacing: 6px;
-            font-weight: bold;
-        }
-
         .iframe-container {
             width: 100%;
-            height: 520px;
+            height: 450px;
             border: 1px solid #ddd;
             border-radius: 8px;
             background-color: #fdfdfd;
+        }
+
+        .badge-code {
+            font-size: 0.95rem;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-lote {
+            font-size: 0.95rem;
+        }
+
+        .switch-container {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 10px 15px;
+        }
+
+        /* Estilos para Agrupación por Lote */
+        .tr-lote-header {
+            background-color: #eef2f7 !important;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .tr-lote-header:hover {
+            background-color: #e2e8f0 !important;
+        }
+
+        .btn-toggle-lote {
+            transition: transform 0.2s ease;
+        }
+
+        .btn-toggle-lote.rotated {
+            transform: rotate(90deg);
+        }
+
+        .child-row {
+            background-color: #ffffff;
+        }
+
+        .child-indent {
+            padding-left: 2rem !important;
         }
     </style>
 </head>
 
 <body>
 
-    <button class="btn btn-primary btn-add-floating" data-bs-toggle="modal" data-bs-target="#modalSubirDoc" title="Registrar Documento">
-        <i class="fa-solid fa-plus"></i>
-    </button>
+    <div class="container py-4">
+        <!-- Cabecera -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h4 class="text-primary fw-bold mb-0">Red San Román - SGD</h4>
+                <small class="text-secondary fw-semibold">Gestión de Firma Digital por Lotes Agrupados</small>
+            </div>
+            <button class="btn btn-primary fw-bold" data-bs-toggle="modal" data-bs-target="#modalSubirDoc">
+                <i class="fa-solid fa-cloud-arrow-up me-2"></i> Cargar Pack de PDFs
+            </button>
+        </div>
 
-    <div class="container p-3">
-        <div class="card search-card mx-auto">
-            <div class="card-body p-4 text-center">
-                <h5 class="text-secondary fw-bold mb-1">Firma Digital</h5>
-                <h4 class="text-primary fw-bold mb-4">Red San Román - SGD</h4>
+        <!-- Panel Principal -->
+        <div class="card main-card">
+            <div class="card-body p-4">
 
-                <form id="formBuscarCodigo">
-                    <div class="mb-4">
-                        <label for="codigo_busqueda" class="form-label text-muted fw-semibold small">INGRESE CÓDIGO DE CONTROL</label>
-                        <input type="text" id="codigo_busqueda" class="form-control input-code" maxlength="4" placeholder="XXXX" required autocomplete="off">
+                <!-- Buscador rápido por Lote o Documento -->
+                <div class="row g-2 mb-3 align-items-center">
+                    <div class="col-md-7">
+                        <div class="input-group">
+                            <span class="input-group-text bg-white"><i class="fa-solid fa-magnifying-glass text-muted"></i></span>
+                            <input type="text" id="txtBuscar" class="form-control" placeholder="Buscar por Código Doc, Lote (ej: L-9A2F) o Nombre..." onkeyup="filtrarDocumentos()">
+                            <button class="btn btn-outline-secondary" type="button" onclick="limpiarBuscador()">Limpiar</button>
+                        </div>
                     </div>
-                    <button type="submit" class="btn btn-primary w-100 py-2 fw-bold">
-                        <i class="fa-solid fa-file-magnifying-glass me-2"></i> Consultar Última Versión
-                    </button>
-                </form>
+                    <div class="col-md-5 text-md-end">
+                        <button id="btnFirmarSeleccionados" class="btn btn-success fw-bold d-none" onclick="prepararFirmaLote()">
+                            <i class="fa-solid fa-file-signature me-2"></i> Firmar Seleccionados (<span id="cntSeleccionados">0</span>)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Tabla Agrupada por Lotes -->
+                <div class="table-responsive">
+                    <table class="table align-middle" id="tablaDocs">
+                        <thead class="table-light">
+                            <tr>
+                                <th style="width: 40px;">
+                                    <input type="checkbox" class="form-check-input" id="chkSelectAll" onchange="toggleSelectAll(this)">
+                                </th>
+                                <th>Lote / Código</th>
+                                <th>Detalle Documento / Pack</th>
+                                <th>Versión</th>
+                                <th>Fecha Carga</th>
+                                <th class="text-end">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tbodyDocumentos">
+                            <!-- Se puebla dinámicamente agrupado por lotes -->
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
 
+    <!-- MODAL: Subir Archivos -->
     <div class="modal fade" id="modalSubirDoc" data-bs-backdrop="static" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered ">
+        <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header bg-primary text-white">
-                    <h5 class="modal-title fw-bold"><i class="fa-solid fa-cloud-arrow-up me-2"></i> Registrar PDF en Sistema</h5>
+                    <h5 class="modal-title fw-bold"><i class="fa-solid fa-cloud-arrow-up me-2"></i> Registrar Pack de PDFs</h5>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <form id="formSubirDoc" enctype="multipart/form-data">
                     <div class="modal-body">
                         <div class="mb-3">
-                            <label class="form-label fw-semibold">Descripción o Nombre de Control</label>
-                            <input type="text" name="nombre_archivo" class="form-control" placeholder="Ej. Proveído N° 450-2026-RED-SR" required>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label fw-semibold">Seleccionar Documento PDF</label>
-                            <input type="file" name="archivo_pdf" class="form-control" accept="application/pdf" required>
+                            <label class="form-label fw-semibold">Seleccionar Documentos PDF</label>
+                            <input type="file" name="archivos_pdf[]" class="form-control" accept="application/pdf" multiple required>
+                            <div class="form-text">Si seleccionas múltiples archivos, se agruparán bajo un mismo <strong>Código de Lote</strong>.</div>
                         </div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
-                        <button type="submit" class="btn btn-success fw-bold">Subir Documento</button>
+                        <button type="submit" class="btn btn-success fw-bold">Subir Documentos</button>
                     </div>
                 </form>
             </div>
         </div>
     </div>
 
+    <!-- MODAL: Ejecutar Firma -->
     <div class="modal fade" id="modalFirmarDoc" data-bs-backdrop="static" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-centered modal-xl modal-fullscreen-lg-down">
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-xl">
             <div class="modal-content">
                 <div class="modal-header bg-dark text-white d-flex align-items-center">
-                    <h5 class="modal-title fw-bold" id="txtTituloDoc">Visualizador</h5>
-                    <span id="badgeVersion" class="badge bg-warning text-dark ms-3 fw-bold">Versión</span>
+                    <h5 class="modal-title fw-bold" id="txtTituloDoc">Procesar Firma Digital</h5>
                     <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body p-3">
-                    <iframe id="previewPdf" class="iframe-container mb-3" src=""></iframe>
+
+                    <div id="contenedorVisor">
+                        <iframe id="previewPdf" class="iframe-container mb-3" src=""></iframe>
+                    </div>
+
+                    <div id="listaLoteFirmar" class="alert alert-info d-none mb-3">
+                        <h6 class="fw-bold"><i class="fa-solid fa-layer-group me-2"></i> Documentos a firmar en esta operación:</h6>
+                        <ul id="ulDocsLote" class="mb-0 small"></ul>
+                    </div>
 
                     <form id="formEjecutarFirma">
-                        <input type="hidden" id="doc_codigo" name="doc_codigo">
+                        <input type="hidden" id="doc_codigos_hidden" name="doc_codigos">
 
                         <div id="wrapperCamposFirma">
+
+                            <!-- SWITCH: Firmar Uno por Uno -->
+                            <div class="mb-3" id="rowModoFirma">
+                                <div class="switch-container d-flex align-items-center justify-content-between">
+                                    <div>
+                                        <label class="form-check-label fw-bold text-dark mb-0" for="chkOneByOne">
+                                            <i class="fa-solid fa-file-signature text-primary me-2"></i> FIRMAR UNO POR UNO
+                                        </label>
+                                        <div class="small text-muted">
+                                            Si está activado, FirmaPerú solicitará posición y confirmación individual por cada PDF.
+                                        </div>
+                                    </div>
+                                    <div class="form-check form-switch fs-4 mb-0">
+                                        <input class="form-check-input" type="checkbox" id="chkOneByOne" name="one_by_one" value="1">
+                                    </div>
+                                </div>
+                            </div>
+
                             <div class="row g-2">
                                 <div class="col-md-4">
-                                    <label class="form-label fw-semibold small text-muted">Razón de Firma (Firma Digital)</label>
+                                    <label class="form-label fw-semibold small text-muted">Razón de Firma</label>
                                     <select name="tipo_firma" class="form-select" required>
                                         <option value="" disabled selected>-- Elija la Razón --</option>
                                         <option value="Soy el autor del documento">Soy el autor del documento</option>
@@ -207,12 +341,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                                     </select>
                                 </div>
                                 <div class="col-md-4">
-                                    <label class="form-label fw-semibold small text-muted">Orientación</label>
+                                    <label class="form-label fw-semibold small text-muted">Orientación Estampa</label>
                                     <select name="signaturestyle" class="form-select" required>
-
-                                        <option value="1" selected>Horizontal </option>
-                                        <option value="2" >Vertical </option>
-
+                                        <option value="1" selected>Horizontal</option>
+                                        <option value="2">Vertical</option>
                                     </select>
                                 </div>
                                 <div class="col-md-4">
@@ -223,11 +355,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                         </div>
 
                         <div class="d-flex justify-content-end gap-2 mt-3 pt-2 border-top">
-                            <button type="button" id="btnDescargarPdf" class="btn btn-primary">
-                                <i class="bi bi-download"></i> Descargar PDF
-                            </button>
                             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
-                            <button type="submit" class="btn btn-success fw-bold">Firmar con FirmaPerú</button>
+                            <button type="submit" class="btn btn-success fw-bold">
+                                <i class="fa-solid fa-pen-nib me-2"></i> Firmar con FirmaPerú
+                            </button>
                         </div>
                     </form>
                 </div>
@@ -238,32 +369,174 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://apps.firmaperu.gob.pe/web/clienteweb/firmaperu.min.js"></script>
-    <div id="addComponent" style="display:none;"></div>
 
     <script>
         const modalSubir = new bootstrap.Modal(document.getElementById('modalSubirDoc'));
         const modalFirmar = new bootstrap.Modal(document.getElementById('modalFirmarDoc'));
-
-        // Callbacks de FirmaPerú (Requeridos obligatoriamente de forma global)
         var jqFirmaPeru = jQuery.noConflict(true);
+        let timerBusqueda = null;
 
-        function signatureInit() {
-            Swal.fire({
-                title: 'Lanzando FirmaPerú...',
-                text: 'Por favor, ejecute y acepte la firma digital en el software local de RENIEC.',
-                allowOutsideClick: false,
-                didOpen: () => {
-                    Swal.showLoading();
-                }
-            });
+        document.addEventListener('DOMContentLoaded', () => cargarDocumentos());
+
+        function cargarDocumentos(busqueda = '') {
+            let formData = new FormData();
+            formData.append('busqueda', busqueda);
+
+            fetch('?action=listar', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(async res => {
+                    const text = await res.text();
+                    try {
+                        return JSON.parse(text);
+                    } catch (e) {
+                        throw new Error("Respuesta no válida del servidor.");
+                    }
+                })
+                .then(res => {
+                    if (res.status === 'success') {
+                        const tbody = document.getElementById('tbodyDocumentos');
+                        tbody.innerHTML = '';
+
+                        if (res.data.length === 0) {
+                            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-4">No se encontraron registros.</td></tr>`;
+                            actualizarSeleccion();
+                            return;
+                        }
+
+                        // Agrupar la data por Código de Lote
+                        const lotes = {};
+                        res.data.forEach(doc => {
+                            const keyLote = doc.codigo_lote !== 'SIN_LOTE' ? doc.codigo_lote : 'SIN_LOTE';
+                            if (!lotes[keyLote]) {
+                                lotes[keyLote] = [];
+                            }
+                            lotes[keyLote].push(doc);
+                        });
+
+                        let loteIndex = 0;
+                        for (const [codigoLote, items] of Object.entries(lotes)) {
+                            loteIndex++;
+
+                            // A) Si tiene Lote asignado
+                            if (codigoLote !== 'SIN_LOTE') {
+                                const targetId = `lote_collapse_${loteIndex}`;
+                                const codigosDelLote = items.map(d => d.codigo).join(',');
+
+                                // Fila Padre (Lote)
+                                tbody.innerHTML += `
+                                    <tr class="tr-lote-header" onclick="toggleAcordeon('${targetId}', this)">
+                                        <td>
+                                            <input type="checkbox" class="form-check-input chk-lote-group" 
+                                                   data-target-group="${targetId}" 
+                                                   onchange="toggleSelectLote(this, '${targetId}')" 
+                                                   onclick="event.stopPropagation()">
+                                        </td>
+                                        <td>
+                                            <i class="fa-solid fa-chevron-right me-2 text-primary btn-toggle-lote"></i>
+                                            <span class="badge bg-info text-dark badge-lote fw-bold">
+                                                <i class="fa-solid fa-layer-group me-1"></i>${codigoLote}
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <strong>Pack de ${items.length} documento(s)</strong>
+                                            <small class="text-muted d-block">${items[0].nombre_original} ${items.length > 1 ? 'y otros...' : ''}</small>
+                                        </td>
+                                        <td><span class="badge bg-light text-dark border">Grupo</span></td>
+                                        <td class="small text-muted">${items[0].fecha_creacion || '-'}</td>
+                                        <td class="text-end" onclick="event.stopPropagation()">
+                                            <button class="btn btn-sm btn-info fw-bold me-1 text-white" onclick="firmarLoteCompleto('${codigoLote}')" title="Firmar lote completo">
+                                                <i class="fa-solid fa-pen-nib me-1"></i> Firmar Lote
+                                            </button>
+                                        </td>
+                                    </tr>
+                                `;
+
+                                // Filas Hijas (Documentos individuales del Lote)
+                                items.forEach(doc => {
+                                    tbody.innerHTML += `
+                                        <tr class="child-row ${targetId} d-none">
+                                            <td class="child-indent">
+                                                <input type="checkbox" class="form-check-input chk-doc chk-item-${targetId}" 
+                                                       value="${doc.codigo}" 
+                                                       onchange="actualizarSeleccion()">
+                                            </td>
+                                            <td class="ps-4">
+                                                <i class="fa-solid fa-arrow-turn-up fa-rotate-90 text-muted me-2"></i>
+                                                <span class="badge bg-primary badge-code">${doc.codigo}</span>
+                                            </td>
+                                            <td class="fw-semibold text-secondary">${doc.nombre_original}</td>
+                                            <td><span class="badge bg-secondary">v${doc.version_actual}</span></td>
+                                            <td class="small text-muted">${doc.fecha_creacion || '-'}</td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-primary me-1" onclick="verIndividual('${doc.codigo}')">
+                                                    <i class="fa-solid fa-eye"></i> Ver / Firmar
+                                                </button>
+                                                <a href="${doc.ruta_pdf}" target="_blank" class="btn btn-sm btn-outline-secondary">
+                                                    <i class="fa-solid fa-download"></i>
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    `;
+                                });
+                            }
+                            // B) Si son documentos sueltos (Sin Lote)
+                            else {
+                                items.forEach(doc => {
+                                    tbody.innerHTML += `
+                                        <tr>
+                                            <td>
+                                                <input type="checkbox" class="form-check-input chk-doc" value="${doc.codigo}" onchange="actualizarSeleccion()">
+                                            </td>
+                                            <td><span class="badge bg-primary badge-code">${doc.codigo}</span></td>
+                                            <td class="fw-semibold">${doc.nombre_original}</td>
+                                            <td><span class="badge bg-secondary">v${doc.version_actual}</span></td>
+                                            <td class="small text-muted">${doc.fecha_creacion || '-'}</td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-primary me-1" onclick="verIndividual('${doc.codigo}')">
+                                                    <i class="fa-solid fa-eye"></i> Ver / Firmar
+                                                </button>
+                                                <a href="${doc.ruta_pdf}" target="_blank" class="btn btn-sm btn-outline-secondary">
+                                                    <i class="fa-solid fa-download"></i>
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    `;
+                                });
+                            }
+                        }
+
+                        actualizarSeleccion();
+                    }
+                })
+                .catch(err => console.error(err));
         }
 
-        function signatureOk() {
-            const codigo = document.getElementById('doc_codigo').value;
+        // Mostrar / Ocultar Filas Hijas del Lote
+        function toggleAcordeon(targetClass, trHeader) {
+            const filasHijas = document.querySelectorAll(`.${targetClass}`);
+            const icono = trHeader.querySelector('.btn-toggle-lote');
 
-            // Re-consultar el estado al backend para verificar la nueva versión guardada
+            filasHijas.forEach(fila => {
+                fila.classList.toggle('d-none');
+            });
+
+            if (icono) {
+                icono.classList.toggle('rotated');
+            }
+        }
+
+        // Checkbox del Lote Padre marca todos sus documentos hijos
+        function toggleSelectLote(masterChk, targetClass) {
+            const checkboxesHijos = document.querySelectorAll(`.chk-item-${targetClass}`);
+            checkboxesHijos.forEach(chk => chk.checked = masterChk.checked);
+            actualizarSeleccion();
+        }
+
+        function firmarLoteCompleto(codigoLote) {
             let formData = new FormData();
-            formData.append('codigo', codigo);
+            formData.append('query', codigoLote);
 
             fetch('?action=buscar', {
                     method: 'POST',
@@ -272,122 +545,205 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
                 .then(res => res.json())
                 .then(data => {
                     if (data.status === 'success') {
-                        // Cargar el visor con el nuevo archivo UUID creado sin caché de navegador
-                        document.getElementById('previewPdf').src = data.data.ruta_pdf + '?t=' + new Date().getTime();
-                        document.getElementById('badgeVersion').innerText = "Versión Actual: " + data.data.version_nro;
-
-                        Swal.fire({
-                            icon: 'success',
-                            title: '¡Documento Firmado!',
-                            text: 'Se guardó con éxito una nueva versión del archivo en el historial.',
-                        }).then(() => {
-                            //modalFirmar.hide();
-                            document.getElementById('formBuscarCodigo').reset();
-                        });
+                        const codigos = data.data.map(d => d.codigo);
+                        abrirModalFirmaLote(data.data, codigos, `Lote ${codigoLote}`);
+                    } else {
+                        Swal.fire('Atención', data.message, 'warning');
                     }
                 });
         }
 
-        function signatureCancel() {
-            Swal.fire('Operación Cancelada', 'No se ha aplicado ningún cambio.', 'info');
+        function filtrarDocumentos() {
+            clearTimeout(timerBusqueda);
+            const val = document.getElementById('txtBuscar').value.trim();
+            timerBusqueda = setTimeout(() => cargarDocumentos(val), 300);
         }
 
-        // CONTROLADOR: Guardar original inicial (Versión 0)
+        function limpiarBuscador() {
+            document.getElementById('txtBuscar').value = '';
+            cargarDocumentos('');
+        }
+
+        function toggleSelectAll(master) {
+            document.querySelectorAll('.chk-doc, .chk-lote-group').forEach(chk => chk.checked = master.checked);
+            // Asegurar que si marca el general, marque todos los hijos aunque estén ocultos
+            document.querySelectorAll('.chk-doc').forEach(chk => chk.checked = master.checked);
+            actualizarSeleccion();
+        }
+
+        function actualizarSeleccion() {
+            const seleccionados = Array.from(document.querySelectorAll('.chk-doc:checked')).map(c => c.value);
+            const btn = document.getElementById('btnFirmarSeleccionados');
+            document.getElementById('cntSeleccionados').innerText = seleccionados.length;
+
+            if (seleccionados.length > 0) {
+                btn.classList.remove('d-none');
+            } else {
+                btn.classList.add('d-none');
+            }
+        }
+
+        function verIndividual(codigo) {
+            let formData = new FormData();
+            formData.append('codigos[]', codigo);
+
+            fetch('?action=buscar', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success' && data.data.length > 0) {
+                        const doc = data.data[0];
+                        document.getElementById('txtTituloDoc').innerText = 'Documento: ' + doc.nombre_original;
+                        document.getElementById('doc_codigos_hidden').value = doc.codigo;
+
+                        document.getElementById('contenedorVisor').classList.remove('d-none');
+                        document.getElementById('listaLoteFirmar').classList.add('d-none');
+
+                        document.getElementById('rowModoFirma').classList.add('d-none');
+                        document.getElementById('chkOneByOne').checked = false;
+
+                        document.getElementById('previewPdf').src = doc.ruta_pdf + '?t=' + new Date().getTime();
+
+                        modalFirmar.show();
+                    }
+                });
+        }
+
+        function prepararFirmaLote() {
+            const codigos = Array.from(document.querySelectorAll('.chk-doc:checked')).map(c => c.value);
+            if (codigos.length === 0) return;
+
+            let formData = new FormData();
+            codigos.forEach(c => formData.append('codigos[]', c));
+
+            fetch('?action=buscar', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        abrirModalFirmaLote(data.data, codigos, `Selección Manual (${codigos.length} archivos)`);
+                    }
+                });
+        }
+
+        function abrirModalFirmaLote(listaDocs, listaCodigos, tituloLabel) {
+            document.getElementById('txtTituloDoc').innerText = `Firma Masiva - ${tituloLabel}`;
+            document.getElementById('doc_codigos_hidden').value = listaCodigos.join(',');
+
+            document.getElementById('contenedorVisor').classList.add('d-none');
+            const ul = document.getElementById('ulDocsLote');
+            ul.innerHTML = '';
+            listaDocs.forEach(d => {
+                ul.innerHTML += `<li><strong>[${d.codigo}]</strong> ${d.nombre_original} (v${d.version_nro})</li>`;
+            });
+            document.getElementById('listaLoteFirmar').classList.remove('d-none');
+
+            document.getElementById('rowModoFirma').classList.remove('d-none');
+            document.getElementById('chkOneByOne').checked = false;
+
+            modalFirmar.show();
+        }
+
         document.getElementById('formSubirDoc').addEventListener('submit', function(e) {
             e.preventDefault();
             Swal.fire({
-                title: 'Procesando archivo...',
+                title: 'Subiendo archivos...',
                 allowOutsideClick: false,
-                didOpen: () => {
-                    Swal.showLoading();
-                }
+                didOpen: () => Swal.showLoading()
             });
 
             fetch('?action=subir', {
                     method: 'POST',
                     body: new FormData(this)
                 })
-                .then(res => res.json())
+                .then(async res => {
+                    const text = await res.text();
+                    try {
+                        return JSON.parse(text);
+                    } catch (err) {
+                        throw new Error("Respuesta no válida del servidor.");
+                    }
+                })
                 .then(data => {
                     if (data.status === 'success') {
                         this.reset();
                         modalSubir.hide();
+                        cargarDocumentos();
+
+                        let htmlCodes = data.docs.map(d => `<div class="mb-1"><strong>[${d.codigo}]</strong> ${d.nombre}</div>`).join('');
+
                         Swal.fire({
                             icon: 'success',
-                            title: '¡Registro Exitoso!',
-                            html: `<p>Use y distribuya este código único para el firmado correlativo:</p>
-                               <h1 class="display-4 fw-bold text-success bg-light p-2 rounded border">${data.codigo}</h1>`,
-                            confirmButtonText: 'Entendido',
-                            allowOutsideClick: false
+                            title: '¡Pack Registrado con Éxito!',
+                            html: `
+                                <div class="alert alert-info text-start py-2">
+                                    <strong>Código de Lote Asignado:</strong> <span class="badge bg-primary fs-6">${data.codigo_lote}</span>
+                                </div>
+                                <p class="small text-muted text-start">Puedes expandir el grupo en la tabla para ver o firmar sus archivos.</p>
+                                <div class="text-start bg-light p-3 rounded border" style="max-height: 180px; overflow-y: auto;">${htmlCodes}</div>
+                            `,
+                            confirmButtonText: 'Entendido'
                         });
                     } else {
                         Swal.fire('Error', data.message, 'error');
                     }
-                });
+                })
+                .catch(err => Swal.fire('Error', err.message, 'error'));
         });
 
-        // CONTROLADOR: Buscar la última versión guardada bajo el ID de 4 dígitos
-        document.getElementById('formBuscarCodigo').addEventListener('submit', function(e) {
+        // Ejecutar Proceso con FirmaPerú
+        document.getElementById('formEjecutarFirma').addEventListener('submit', function(e) {
             e.preventDefault();
-            let formData = new FormData();
-            formData.append('codigo', document.getElementById('codigo_busqueda').value);
 
-            fetch('?action=buscar', {
+            let formData = new FormData(this);
+            if (!document.getElementById('chkOneByOne').checked) {
+                formData.set('one_by_one', '0');
+            } else {
+                formData.set('one_by_one', '1');
+            }
+
+            fetch('guardar_firma.php', {
                     method: 'POST',
                     body: formData
                 })
                 .then(res => res.json())
                 .then(data => {
                     if (data.status === 'success') {
-                        document.getElementById('txtTituloDoc').innerText = data.nombre;
-                        document.getElementById('doc_codigo').value = data.codigo;
-                        document.getElementById('previewPdf').src = data.data.ruta_pdf + '?t=' + new Date().getTime();
-                        document.getElementById('badgeVersion').innerText = "Versión: " + data.data.version_nro;
-
-                        document.getElementById('formEjecutarFirma').reset();
-                        modalFirmar.show();
-                    } else {
-                        Swal.fire('Atención', data.message, 'warning');
-                    }
-                });
-        });
-
-        // CONTROLADOR: Lanzar firma mediante AJAX cruzado a guardar_firma.php
-        document.getElementById('formEjecutarFirma').addEventListener('submit', function(e) {
-            e.preventDefault();
-            fetch('guardar_firma.php', {
-                    method: 'POST',
-                    body: new FormData(this)
-                })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === 'success') {
                         signatureInit();
-                        // Ejecuta la función del script oficial de RENIEC pasándole puerto y el Base64 generado
                         startSignature(data.port, data.param_b64);
                     } else {
-                        Swal.fire('Error', 'No se pudieron procesar los parámetros.', 'error');
+                        Swal.fire('Error', data.message || 'No se pudieron procesar los parámetros.', 'error');
                     }
                 });
-
         });
 
-        document.getElementById('btnDescargarPdf').onclick = function() {
-            const pdfUrl = document.getElementById('previewPdf').src;
+        function signatureInit() {
+            Swal.fire({
+                title: 'Lanzando FirmaPerú...',
+                text: 'Por favor, confirme la firma en la aplicación cliente FirmaPerú.',
+                allowOutsideClick: false,
+                didOpen: () => Swal.showLoading()
+            });
+        }
 
-            // Creamos un enlace temporal en memoria
-            const link = document.createElement('a');
-            link.href = pdfUrl;
-            const nombreArchivo = document.getElementById('txtTituloDoc').innerText.replace(/\s+/g, '_') + '.pdf';
-            link.download = nombreArchivo; // Nombre con el que se descargará
-            link.target = '_blank';
+        function signatureOk() {
+            modalFirmar.hide();
+            Swal.fire({
+                icon: 'success',
+                title: '¡Proceso de Firma Completado!',
+                text: 'Se han actualizado las versiones firmadas de los documentos seleccionados.'
+            }).then(() => {
+                cargarDocumentos();
+            });
+        }
 
-            // Simulamos el clic y lo eliminamos
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        };
-
+        function signatureCancel() {
+            Swal.fire('Operación Cancelada', 'No se aplicó ninguna firma.', 'info');
+        }
     </script>
 </body>
 

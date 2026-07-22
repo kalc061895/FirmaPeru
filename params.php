@@ -52,25 +52,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    $codigo_doc = $pendiente['codigo_documento'];
-    // 2. OBTENER LA ÚLTIMA VERSIÓN FÍSICA ASOCIADA A ESE CÓDIGO (EL ÚLTIMO FIRMADO)
-    $stmtVersion = $pdo->prepare("SELECT * FROM documento_versiones WHERE codigo_documento = ? ORDER BY version_nro DESC LIMIT 1");
-    $stmtVersion->execute([$codigo_doc]);
-    $version_act = $stmtVersion->fetch(PDO::FETCH_ASSOC);
+    $codigos = json_decode($pendiente['codigo_documento'], true);
+    $es_lote = is_array($codigos) && count($codigos) > 1;
 
-    if (!$version_act) {
-        http_response_code(404);
-        echo 'No se encontró un archivo base para este documento';
-        exit;
+    if ($es_lote) {
+        // Ruta al archivo .7z generado previamente
+        $documento_url = $baseUrl . '/archivos_sgd/input_' . $token_transaccion . '.7z';
+    } else {
+        $codigo_doc = is_array($codigos) ? $codigos[0] : $pendiente['codigo_documento'];
+        $stmtVersion = $pdo->prepare("SELECT ruta_pdf FROM documento_versiones WHERE codigo_documento = ? ORDER BY version_nro DESC LIMIT 1");
+        $stmtVersion->execute([$codigo_doc]);
+        $documento_url = $baseUrl . $stmtVersion->fetchColumn();
     }
-    $img = ($pendiente['signaturestyle'] == 1)? 'https://rissanroman.gob.pe/firma/img/rssr-logo.png':'https://rissanroman.gob.pe/firma/img/rssr-vertical.png'; 
-    
-    // 3. CONSTRUIR LOS PARÁMETROS BASE DE FIRMAPERÚ
+
+    $img = ($pendiente['signaturestyle'] == 1)
+        ? 'https://rissanroman.gob.pe/firma/img/rssr-logo.png'
+        : 'https://rissanroman.gob.pe/firma/img/rssr-vertical.png';
+
     $firma_params = array(
         "signatureFormat"        => "PAdES",
         "signatureLevel"         => "B",
         "signaturePackaging"     => "enveloped",
-        "documentToSign"         => $baseUrl . $version_act['ruta_pdf'], // Ruta al último PDF (con su nombre UUID)
+        "documentToSign"         => $documento_url,
         "certificateFilter"      => ".*",
         "webTsa"                 => "",
         "userTsa"                => "",
@@ -78,23 +81,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         "theme"                  => "claro",
         "visiblePosition"        => true,
         "contactInfo"            => "",
-        "signatureReason"        => $pendiente['tipo_firma'], // Razón recuperada de la BD
-        "bachtOperation"         => false,
-        "oneByOne"               => true,
-        "signatureStyle"         => $pendiente['signaturestyle'] ?? 1, // 1 horizontal, 2 vertical
-        "imageToStamp"           => $img, // Imagen de sello según estilo,
-        //"imageToStamp"           => "https://rissanroman.gob.pe/firma/img/rssr-logo.png",
-        //"imageToStamp"           => "https://rissanroman.gob.pe/firma/img/rssr-sign.png",
+        "signatureReason"        => $pendiente['tipo_firma'],
+
+        // PARAMETROS DE LOTE DINÁMICOS
+        "bachtOperation"         => $es_lote, // True si es lote, False si es único
+        //"oneByOne"               => ($pendiente['one_by_one']) ? true : false,
+        "oneByOne"               => ($pendiente['one_by_one'])? true:false,
+
+        "signatureStyle"         => $pendiente['signaturestyle'] ?? 1,
+        "imageToStamp"           => $img,
         "stampTextSize"          => 14,
         "stampWordWrap"          => 37,
-        "role"                   => $pendiente['cargo'], // Cargo recuperado de la BD
+        "role"                   => $pendiente['cargo'],
         "stampPage"              => 1,
         "positionx"              => 20,
         "positiony"              => 20,
-        // El documento firmado irá directamente al archivo dedicado pasándole el token por la URL
-        "uploadDocumentSigned"   => $baseUrl . "firmado.php?token=" . urlencode($token_transaccion),
+        "uploadDocumentSigned"   => $baseUrl . "/firmado.php?token=" . urlencode($token_transaccion),
         "certificationSignature" => false,
-        "token"                  => obtener_token() // Token dinámico de la API oficial
+        "token"                  => obtener_token()
     );
 
     // Codificamos a JSON
