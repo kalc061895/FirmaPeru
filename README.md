@@ -14,7 +14,7 @@ Sigue estos pasos para desplegar la aplicación en un nuevo servidor mediante Do
 Acede al directorio del servidor donde alojarás la aplicación y clona el proyecto:
 
 ```bash
-git clone <URL_DE_TU_REPOSITO_GIT> sgd-firmas
+git clone https://github.com/kalc061895/FirmaPeru.git sgd-firmas
 cd sgd-firmas
 ```
 
